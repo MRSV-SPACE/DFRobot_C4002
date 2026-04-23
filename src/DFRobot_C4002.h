@@ -194,7 +194,7 @@ typedef enum {
  * @struct sDetectResult_t
  * @brief The detection result
 */
-typedef struct {
+typedef struct __attribute__((packed)) {
   uint8_t  targetStatus;
   uint16_t light;
   uint32_t existDistIndex;
@@ -211,7 +211,7 @@ typedef struct {
  * @struct sDataHeader_t
  * @brief The data header of the received package
 */
-typedef struct {
+typedef struct __attribute__((packed)) {
   uint8_t  cmd;
   uint8_t  respCode;
   uint16_t dataLen;
@@ -221,7 +221,7 @@ typedef struct {
  * @struct sRecvPack_t
  * @brief The received package
 */
-typedef struct {
+typedef struct __attribute__((packed)) {
   sDataHeader_t   dataHeader;
   uint8_t         data[50];
   uint8_t         packType;
@@ -232,7 +232,7 @@ typedef struct {
  * @struct sResData_t
  * @brief The detection result and environment calibration information
 */
-typedef struct {
+typedef struct __attribute__((packed)) {
   uint8_t         cmd;
   uint8_t         respCode;
   sDetectResult_t dectResult;

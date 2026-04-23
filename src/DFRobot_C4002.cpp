@@ -682,7 +682,9 @@ sConfigParams_t DFRobot_C4002::getAllConfigParams(void)
 
 sRetResult_t DFRobot_C4002::getNoteInfo(void)
 {
-  sRetResult_t ret;
+  sRetResult_t ret = {};
+  ret.noteType = eNoNote;
+  ret.calibCountdown = 0;
   sRecvPack_t  recData = recvPack();
 
   if (eSucceed == recData.resPonCode) {
