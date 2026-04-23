@@ -682,25 +682,33 @@ sConfigParams_t DFRobot_C4002::getAllConfigParams(void)
 
 sRetResult_t DFRobot_C4002::getNoteInfo(void)
 {
+  // Keep existing one-shot semantics for compatibility.
+  return waitForMessage(0);
+}
+
+sRetResult_t DFRobot_C4002::waitForMessage(uint32_t timeoutMs)
+{
   sRetResult_t ret = {};
   ret.noteType = eNoNote;
   ret.calibCountdown = 0;
-  sRecvPack_t  recData = recvPack();
-
-  if (eSucceed == recData.resPonCode) {
-    if (recData.packType == FRAME_TYPE_NOTIFICATION) {    //note
+  uint32_t startMs = millis();
+  do {
+    sRecvPack_t recData = recvPack();
+    if (eSucceed == recData.resPonCode && recData.packType == FRAME_TYPE_NOTIFICATION) {
       if (recData.dataHeader.cmd == NOTE_RESULT_CMD) {
         memcpy(&_detectResult, &recData.data[0], sizeof(sDetectResult_t));
         ret.noteType = eResult;
+        return ret;
       } else if (recData.dataHeader.cmd == NOTE_ENVIRNMENT_CALIBRATION_CMD) {
         DBG("get calibration result");
         ret.calibCountdown = recData.data[1] << 8 | recData.data[0];
-        ret.noteType       = eCalibration;
-      } else {
-        ret.noteType = eNoNote;
+        ret.noteType = eCalibration;
+        return ret;
       }
     }
-  }
+    // timeoutMs == 0 means one-shot behavior (single recvPack attempt).
+  } while (timeoutMs > 0 && (millis() - startMs) < timeoutMs);
+
   return ret;
 }
 
@@ -815,53 +823,107 @@ sRecvPack_t DFRobot_C4002::recvPack()
 {
   sRecvPack_t recvDat;
   memset(&recvDat, 0, sizeof(recvDat));
-  uint8_t *pdata = (uint8_t *)malloc(60 * sizeof(uint8_t));
-  if (pdata == NULL) {
-    recvDat.packType = FRAME_ERROR;
-    return recvDat;
-  }
+  recvDat.packType = FRAME_ERROR;
+  recvDat.resPonCode = eCmdErr;
 
-  uint16_t recvLen = readReg(0, pdata, 8);
-  DBG("recvLen:");
-  DBG(recvLen);
+  // Stream parser with header resync: recover from dropped/misaligned UART bytes.
+  uint8_t frame[60] = { 0 };
+  uint16_t frameIdx = 0;
+  uint16_t packLen = 0;
+  uint32_t startMs = millis();
+  const uint32_t recvTimeoutMs = (uint32_t)TIME_OUT * 3u;
 
-  if (recvLen == 8 && pdata[0] == FRAME_HEADER1 && pdata[1] == FRAME_HEADER2 && pdata[2] == FRAME_HEADER3 && pdata[3] == FRAME_HEADER4) {
-    uint16_t packLen = (pdata[5] << 8) | pdata[4];
-    recvLen          = readReg(0, &pdata[8], packLen - 8);
-    if (recvLen == (packLen - 8)) {
-      recvDat.packType = pdata[7];
-      if (checkSum(pdata, packLen)) {
+  while ((millis() - startMs) < recvTimeoutMs) {
+    while (_serial->available() > 0) {
+      uint8_t b = (uint8_t)_serial->read();
 
-        uint16_t dataLen = (pdata[11] << 8) | pdata[10];
-        memcpy(&recvDat, &pdata[8], dataLen);
-        recvDat.resPonCode = (eResponseCode_t)recvDat.dataHeader.respCode;
-        DBG("get resPonCode");
-        DBG(recvDat.resPonCode);
-
-        if (recvDat.packType == FRAME_TYPE_NOTIFICATION) {    //note
-          DBG("get note result");
-        } else if (recvDat.packType == FRAME_TYPE_WRITE_RESPOND) {    //write
-          DBG("get write respond");
-        } else if (recvDat.packType == FRAME_TYPE_READ_RESPOND) {    //read
-          DBG("get read respond");
+      if (frameIdx < 4) {
+        // Header match with overlap handling.
+        const uint8_t expectedHeader[4] = { FRAME_HEADER1, FRAME_HEADER2, FRAME_HEADER3, FRAME_HEADER4 };
+        if (b == expectedHeader[frameIdx]) {
+          frame[frameIdx++] = b;
+        } else if (b == FRAME_HEADER1) {
+          frame[0] = b;
+          frameIdx = 1;
         } else {
-          DBG("this is error pack");
-          recvDat.resPonCode = eCmdErr;
+          frameIdx = 0;
         }
+        continue;
+      }
 
-      } else {
+      // After header is aligned, collect remaining bytes in order.
+      if (frameIdx >= sizeof(frame)) {
+        // Safety reset on impossible growth.
+        frameIdx = 0;
+        packLen = 0;
+        continue;
+      }
+      frame[frameIdx++] = b;
+
+      // Once length field is present, validate packet size.
+      if (packLen == 0 && frameIdx >= 6) {
+        packLen = ((uint16_t)frame[5] << 8) | frame[4];
+        if (packLen < 10 || packLen > sizeof(frame)) {
+          DBG("packLen invalid, resync");
+          frameIdx = 0;
+          packLen = 0;
+          continue;
+        }
+      }
+
+      // Wait until full frame received.
+      if (packLen == 0 || frameIdx < packLen) {
+        continue;
+      }
+
+      // Full frame candidate: validate checksum and decode.
+      recvDat.packType = frame[7];
+      if (!checkSum(frame, (uint8_t)packLen)) {
         recvDat.resPonCode = eAuthenticationErr;
         DBG("Authentication error");
+        frameIdx = 0;
+        packLen = 0;
+        continue;
       }
-    } else {
-      recvDat.resPonCode = eDataLenErr;
-      DBG(" recvLen error");
+
+      if (packLen < 12) {
+        recvDat.resPonCode = eDataLenErr;
+        DBG("recvLen error");
+        frameIdx = 0;
+        packLen = 0;
+        continue;
+      }
+
+      uint16_t dataLen = ((uint16_t)frame[11] << 8) | frame[10];
+      if (dataLen > sizeof(recvDat) || (uint16_t)(8 + dataLen + 2) > packLen) {
+        recvDat.resPonCode = eDataLenErr;
+        DBG("dataLen error");
+        frameIdx = 0;
+        packLen = 0;
+        continue;
+      }
+
+      memcpy(&recvDat, &frame[8], dataLen);
+      recvDat.resPonCode = (eResponseCode_t)recvDat.dataHeader.respCode;
+      DBG("get resPonCode");
+      DBG(recvDat.resPonCode);
+
+      if (recvDat.packType == FRAME_TYPE_NOTIFICATION) {    //note
+        DBG("get note result");
+      } else if (recvDat.packType == FRAME_TYPE_WRITE_RESPOND) {    //write
+        DBG("get write respond");
+      } else if (recvDat.packType == FRAME_TYPE_READ_RESPOND) {    //read
+        DBG("get read respond");
+      } else {
+        DBG("this is error pack");
+        recvDat.resPonCode = eCmdErr;
+      }
+      return recvDat;
     }
-  } else {
-    recvDat.resPonCode = eAuthenticationErr;
-    DBG("Authentication error");
   }
-  free(pdata);
+
+  // Timeout without a full valid frame.
+  recvDat.resPonCode = eDataLenErr;
   return recvDat;
 }
 

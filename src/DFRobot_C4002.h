@@ -450,6 +450,17 @@ public:
   sRetResult_t getNoteInfo(void);
 
   /**
+   * @fn waitForMessage
+   * @brief Wait for a notification message from the sensor.
+   * @param timeoutMs : Max wait time in milliseconds. 0 means one-shot read (same behavior as getNoteInfo()).
+   * @return  sRetResult_t
+   * @n           noteType      : eResult when a result notification arrives, eCalibration when calibration notification arrives.
+   * @n           calibCountdown: Remaining calibration time in seconds for eCalibration.
+   * @n           eNoNote       : No notification received before timeout.
+  */
+  sRetResult_t waitForMessage(uint32_t timeoutMs);
+
+  /**
    * @fn getTargetState
    * @brief Get the current state of the target
    * @return eTargetState_t
